@@ -2,9 +2,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.stats import multivariate_normal, expon, beta, norm, truncnorm
-from scipy.integrate import quad
-import numpy as np
-from scipy.interpolate import BSpline, make_interp_spline
 
 class Dataset:
     def __init__(self, data=None):
@@ -13,33 +10,7 @@ class Dataset:
     def name(self, name):
         self.name = name
 
-    def estimate_F1s_bspline(self, s, t, l, h, kernel, se_fit=False, scale='plain', boostrap_n=100, k=3):
-
-        mask = (self.data['eta'] == 1) & (self.data['delta'] == 1) & (self.data['Y'] >= l)
-        Y_selected = np.unique(self.data.loc[mask, 'Y'].to_numpy())
-
-        est, se = self.estimate_F1s(Y_selected, t, l, h, kernel, se_fit=False, scale=scale)
-
-        Y_selected = np.concatenate(([l], Y_selected))
-        est = np.concatenate(([0], est))
-
-        est_bspline = make_interp_spline(Y_selected, est, k=k)(s)
-
-        if se_fit:
-            for _boot in range(boostrap_n):
-                sample_indices = np.random.choice(len(self.data), len(self.data), replace=True)
-                data_bootstrap = Dataset(self.data.iloc[sample_indices].reset_index(drop=True))
-                est_bootstrap, _ = data_bootstrap.estimate_F1s_bspline(s, t, l, h, kernel, se_fit=False, scale=scale, k=k)
-                if _boot == 0:
-                    bootstrap_estimates = est_bootstrap[:, None]
-                else:
-                    bootstrap_estimates = np.hstack((bootstrap_estimates, est_bootstrap[:, None]))
-            return est_bspline, np.std(bootstrap_estimates, axis=1)
-        
-        else:
-            return est_bspline, None
-
-    def estimate_F1s(self, s, t, l, h, kernel, se_fit=False, scale='plain'):
+    def estimate_F1s(self, s, t, l, h, kernel, se_fit=False):
         est = np.ones_like(s)
         var = np.zeros_like(s)
 
@@ -52,12 +23,10 @@ class Dataset:
         K = kernel((X - t) / h)
 
         if se_fit:
-            # x = np.arange(-1, 1, 0.01)
-            # y = kernel(x)
-            # mu1 = np.trapz(y, x)
-            # mu2 = np.trapz(y ** 2, x)
-            mu1 = kernel.mu1
-            mu2 = kernel.mu2
+            x = np.arange(-1, 1, 0.01)
+            y = kernel(x)
+            mu1 = np.trapz(y, x)
+            mu2 = np.trapz(y ** 2, x)
 
         for i in range(self.data.shape[0]):
             if eta[i] == 0 or l > Y[i] or delta[i] == 0:
@@ -72,40 +41,37 @@ class Dataset:
                 est = est * (1 - numerator / denominator)
                 if se_fit:
                     var = var + numerator / denominator**2
-
-        F1s = 1 - est
             
-        if scale == 'plain':
-            return F1s, np.sqrt(mu2 / mu1 * var) * (1 - F1s) if se_fit else None
-        if scale == 'log':
-            return -np.log(1 - F1s), np.sqrt(mu2 / mu1 * var) if se_fit else None
-        if scale == 'cll':
-            return np.log(-np.log(1 - F1s)), np.sqrt(mu2 / mu1 * var) / -np.log(1 - F1s) if se_fit else None
+        if se_fit:
+            return 1 - est, np.sqrt(mu2 / mu1 * var) * est
+        else:
+            return 1 - est
         
-    def estimate_F1t(self, t, l, h, kernel, se_fit=False, scale='plain'):
+    def estimate_F1t(self, t, l, h, kernel, se_fit=False):
         est = []
         se = []
         for t_i in t:
-            est_i, se_i = self.estimate_F1s(t_i[None], t_i, l, h, kernel, se_fit, scale=scale)
+            est_i, se_i = self.estimate_F1s(t_i[None], t_i, l, h, kernel, se_fit)
             est.append(est_i)
             se.append(se_i)
-        return np.concatenate(est), np.concatenate(se) if se_fit else None
+        return np.concatenate(est), np.concatenate(se)
         
-    def estimate_F2s(self, s, t, l, h, kernel, se_fit=False, scale='plain'):
-        F1s, F1s_se = self.estimate_F1s(s, t, l, h, kernel, se_fit, scale='plain')
-        F1t, F1t_se = self.estimate_F1s(np.array([t]), t, l, h, kernel, se_fit, scale='plain')
-        F2s = F1s / F1t
+    def estimate_F2s(self, s, t, l, h, kernel, se_fit=False):
         if se_fit:
+            F1s, F1s_se = self.estimate_F1s(s, t, l, h, kernel, se_fit)
+            F1t, F1t_se = self.estimate_F1s(np.array([t]), t, l, h, kernel, se_fit)
+            F2s = F1s / F1t
             a = (1 + F1s - 2 * F2s) / F1t**2 / (1 - F1s)
             b = F2s**2 / F1t**2
             var = a * F1s_se**2 + b * F1t_se**2
             var = np.where((var < 0) & np.isclose(var, 0), 0, var)
-        if scale == 'plain':
-            return F2s, np.sqrt(var) if se_fit else None
-        if scale == 'log':
-            return -np.log(1 - F2s), np.sqrt(var) / (1 - F2s) if se_fit else None
-        if scale == 'cll':
-            return np.log(-np.log(1 - F2s)), np.sqrt(var) / (1 - F2s) / -np.log(1 - F2s) if se_fit else None
+            return F2s, np.sqrt(var)
+        else:
+            F1s = self.estimate_F1s(s, t, l, h, kernel, se_fit)
+            F1t = self.estimate_F1s(np.array([t]), t, l, h, kernel, se_fit)
+            F2s = F1s / F1t
+            return F2s
+
     
     def k_fold_split(self, k):
         # yield a pair of train and test data of class Dataset for each fold
@@ -291,75 +257,7 @@ class Design3Dataset(Dataset):
 
     
 # trunc_normal_at_3 = truncnorm(-3, 3, loc=0, scale=1/3).pdf
-# trunc_normal_at_3 = truncnorm(-3, 3, loc=0, scale=1).pdf
-
-class Kernel:
-    """
-    Wrap a kernel/pdf callable and precompute its mu1 = ∫ K(u) du and mu2 = ∫ K(u)^2 du.
-    The provided pdf should accept numpy arrays (works elementwise). If it only accepts
-    scalars, the class will still work because scipy.quad passes scalars to the pdf.
-    """
-    def __init__(self, pdf, support=None, grid_bounds=10, grid_n=20001, atol=1e-8):
-        self.pdf = pdf  # callable: pdf(x) -> array_like
-        self.support = support
-
-        # compute mu1 and mu2
-        if support is None:
-            try:
-                self.mu1, _ = quad(lambda u: float(self.pdf(u)), -np.inf, np.inf, epsabs=atol)
-                self.mu2, _ = quad(lambda u: float(self.pdf(u))**2, -np.inf, np.inf, epsabs=atol)
-            except Exception:
-                # fallback to a wide finite grid if quad fails
-                xs = np.linspace(-grid_bounds, grid_bounds, grid_n)
-                ys = np.asarray(self.pdf(xs), dtype=float)
-                self.mu1 = np.trapz(ys, xs)
-                self.mu2 = np.trapz(ys**2, xs)
-        else:
-            a, b = support
-            xs = np.linspace(a, b, grid_n)
-            ys = np.asarray(self.pdf(xs), dtype=float)
-            self.mu1 = np.trapz(ys, xs)
-            self.mu2 = np.trapz(ys**2, xs)
-
-    def __call__(self, x):
-        x_arr = np.asarray(x)
-        return self.pdf(x_arr)
-
-    @classmethod
-    def gaussian(cls, sigma=1.0):
-        return cls(lambda u: np.exp(-0.5 * (u / sigma) ** 2) / (np.sqrt(2 * np.pi) * sigma))
-
-    @classmethod
-    def epanechnikov(cls):
-        def k(u):
-            u = np.asarray(u)
-            out = np.zeros_like(u, dtype=float)
-            mask = np.abs(u) <= 1
-            out[mask] = 3.0 / 4.0 * (1 - u[mask] ** 2)
-            return out
-        return cls(k, support=(-1, 1))
-
-    @classmethod
-    def uniform(cls):
-        def k(u):
-            u = np.asarray(u)
-            out = np.zeros_like(u, dtype=float)
-            out[np.abs(u) <= 1] = 0.5
-            return out
-        return cls(k, support=(-1, 1))
-
-    @classmethod
-    def triangular(cls):
-        def k(u):
-            u = np.asarray(u)
-            out = np.zeros_like(u, dtype=float)
-            mask = np.abs(u) <= 1
-            out[mask] = 1 - np.abs(u[mask])
-            return out
-        return cls(k, support=(-1, 1))
-    
-trunc_normal_at_3 = Kernel(truncnorm(-3, 3, loc=0, scale=1).pdf)
-# print(trunc_normal_at_3.mu1, trunc_normal_at_3.mu2)
+trunc_normal_at_3 = truncnorm(-3, 3, loc=0, scale=1).pdf
 
 df = pd.read_excel('nan01_req0423.xlsx')
 df['L'] = df['age_first']
